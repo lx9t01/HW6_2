@@ -72,6 +72,7 @@ void cudaGillKernel(float* dev_points,
                 X[idx]--;
             }
         }
+        printf("thread: %d, accu_time: %f, X: %f\n", idx, accu_time[idx], X[idx]);
         __syncthreads();
         idx += blockDim.x * gridDim.x;
     }

@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cassert>
 #include <curand.h>
-#include <curand_kernel.h>
 
 #include "gillespie_cuda.cuh"
 
@@ -56,57 +55,49 @@ int main (int argc, char** argv) {
     check_args(argc, argv);
     const int threadsPerBlock = atoi(argv[1]);
     const int blocks = atoi(argv[2]);
-
-    float* dev_points; // to determine the timestep
-    float* dev_points_2; // to determine the reaction
-
-    const int N = 100; // each iteration there is N simulations running
-
-    cudaMalloc((void**)&dev_points, N * sizeof(float));
-    cudaMalloc((void**)&dev_points_2, N * sizeof(float));
+    const size_t N = 100; // each iteration there is N simulations running
 
     curandGenerator_t gen;
     curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
 
-    float* state;
+    float* dev_state;
     float* dev_concentration;
     float* dev_timestep;
 
-    cudaMalloc((void**) &state, N * sizeof(float));
+    cudaMalloc((void**) &dev_state, N * sizeof(float));
     cudaMalloc((void**) &dev_concentration, N * sizeof(float));
     cudaMalloc((void**) &dev_timestep, N * sizeof(float));
 
-    cudaMemset(state, 0, N * sizeof(float));
+    cudaMemset(dev_state, 0, N * sizeof(float));
     cudaMemset(dev_concentration, 0, N * sizeof(float));
     cudaMemset(dev_timestep, 0, N * sizeof(float));
 
     float* dev_accu_time;
     cudaMalloc((void**) &dev_accu_time, N * sizeof(float));
     cudaMemset(dev_accu_time, 0, N * sizeof(float));
-    float* host_min_time = (float*)malloc(1 * sizeof(float));
-    memset(host_min_time, 0, 1 * sizeof(float));
+
+    float* host_min_time;
+    *host_min_time = 0;
 
     float* dev_min_time;
     cudaMalloc((void**)&dev_min_time, 1 * sizeof(float));
-
-    // std::vector< std::vector<float> > vector_X;
-    // std::vector< std::vector<float> > vector_accu_time;
 
 
     // resampling the data in vectors
     const int T = 1000; // the total time interval after resampling
 
     // the matrix for resampled data
-    float* resamp_X = (float*)malloc(N * T * sizeof(float));
+    float* host_resamp_X = (float*)malloc(N * T * sizeof(float));
 
     float* dev_resample_X;
     cudaMalloc((void**)&dev_resample_X, N * T * sizeof(float));
-    cudaMemset(dev_resample_X, -1.0, N * T * sizeof(float));
-    // the matrix to mark if a time point has been ipdated
-    // int* is_resampled = new int[N * T]();
-    // int* dev_is_resampled;
-    // cudaMalloc((void**)&dev_is_resampled, N * T * sizeof(int));
-    // cudaMemset(dev_is_resampled, 0, N * T * sizeof(int));
+    cudaMemset(dev_resample_X, -1, N * T * sizeof(float));
+
+    float* dev_rand; // to determine the timestep
+    float* dev_rand2; // to determine the reaction
+
+    cudaMalloc((void**)&dev_rand, N * sizeof(float));
+    cudaMalloc((void**)&dev_rand2, N * sizeof(float));
 
     const float final_time = 100;
     curandSetPseudoRandomGeneratorSeed(gen, 1234);
@@ -116,21 +107,17 @@ int main (int argc, char** argv) {
     float* test_accu = (float*)malloc(N * sizeof(float));
     cudaMemcpy(test, dev_concentration, N * sizeof(float), cudaMemcpyDeviceToHost);
     printf("before kernel, X: %f\n", test[0]);
+
+
     while (*host_min_time <= final_time) {
-        curandGenerateUniform(gen, dev_points, N * sizeof(float));
-        curandGenerateUniform(gen, dev_points_2, N * sizeof(float));
-        err = cudaGetLastError();
-        if  (cudaSuccess != err){
-            cerr << "Error " << cudaGetErrorString(err) << endl;
-            // break;
-        } else {
-            cerr << "curand No kernel error detected" << endl;
-        }
+        curandGenerateUniform(gen, dev_rand, N * sizeof(float));
+        curandGenerateUniform(gen, dev_rand2, N * sizeof(float));
+
         cudaMemcpy(test, dev_concentration, N * sizeof(float), cudaMemcpyDeviceToHost);
         printf("before kernel, X: %f\n", test[0]);
         // for each iteration, call a kernel
         // calculates state, X concentration, timestep, accumulate time
-        cudaCallGillKernel(blocks, threadsPerBlock, dev_points, dev_points_2, state, dev_concentration, dev_timestep, dev_accu_time, N);
+        cudaCallGillKernel(blocks, threadsPerBlock, dev_rand, dev_rand2, dev_state, dev_concentration, dev_timestep, dev_accu_time, N);
         err = cudaGetLastError();
         if  (cudaSuccess != err){
             cerr << "Error " << cudaGetErrorString(err) << endl;
@@ -138,6 +125,7 @@ int main (int argc, char** argv) {
         } else {
             cerr << "gill No kernel error detected" << endl;
         }
+
         cudaMemcpy(test, dev_concentration, N * sizeof(float), cudaMemcpyDeviceToHost);
         
         cudaMemcpy(test_accu, dev_accu_time, N * sizeof(float), cudaMemcpyDeviceToHost);
@@ -192,49 +180,49 @@ int main (int argc, char** argv) {
     // }
     free(test_accu);
 
-    cudaMemcpy(resamp_X, dev_resample_X, N * T * sizeof(float), cudaMemcpyDeviceToHost);
-    FILE *total_resample_file = fopen("resample.txt", "w");
+    // cudaMemcpy(resamp_X, dev_resample_X, N * T * sizeof(float), cudaMemcpyDeviceToHost);
+    // FILE *total_resample_file = fopen("resample.txt", "w");
 
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < T; ++j) {
-            fprintf(total_resample_file, "%f ", resamp_X[i * T + j]);
-        }
-        fprintf(total_resample_file, "\n");
-    }
-
-
-    fclose(total_resample_file);
-
-    // find the mean and var
-    float* mean = new float[T]();
-    for (int i = 0; i < T; ++i) {
-        for (int j = 0; j < N; ++j) {
-            mean[i] += resamp_X[j * T + i];
-        }
-        mean[i] /= N;
-    }
+    // for (int i = 0; i < N; ++i) {
+    //     for (int j = 0; j < T; ++j) {
+    //         fprintf(total_resample_file, "%f ", host_resamp_X[i * T + j]);
+    //     }
+    //     fprintf(total_resample_file, "\n");
+    // }
 
 
+    // fclose(total_resample_file);
+
+    // // find the mean and var
+    // float* mean = new float[T]();
+    // for (int i = 0; i < T; ++i) {
+    //     for (int j = 0; j < N; ++j) {
+    //         mean[i] += resamp_X[j * T + i];
+    //     }
+    //     mean[i] /= N;
+    // }
 
 
 
-    FILE *outputFile = fopen("output.txt", "w");
-    for (int i = 0; i < T; ++i) {
-        fprintf(outputFile, "%f ",mean[i]);
-    }
-    fclose(outputFile);
+
+
+    // FILE *outputFile = fopen("output.txt", "w");
+    // for (int i = 0; i < T; ++i) {
+    //     fprintf(outputFile, "%f ",mean[i]);
+    // }
+    // fclose(outputFile);
 
 
     delete mean;
     free(host_min_time);
-    cudaFree(state);
+    cudaFree(dev_state);
     cudaFree(dev_concentration);
-    cudaFree(dev_points);
-    cudaFree(dev_points_2);
+    cudaFree(dev_rand);
+    cudaFree(dev_rand2);
     cudaFree(dev_timestep);
     cudaFree(dev_accu_time);
     cudaFree(dev_min_time);
-    free(resamp_X);
+    free(host_resamp_X);
 
 
     return EXIT_SUCCESS;
